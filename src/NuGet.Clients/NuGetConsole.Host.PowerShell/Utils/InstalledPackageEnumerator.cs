@@ -1,4 +1,4 @@
-// Copyright (c) .NET Foundation. All rights reserved.
+﻿// Copyright (c) .NET Foundation. All rights reserved.
 // Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 using System;
@@ -12,22 +12,26 @@ using NuGet.Common;
 using NuGet.Configuration;
 using NuGet.Frameworks;
 using NuGet.PackageManagement;
-using NuGet.PackageManagement.VisualStudio;
 using NuGet.Packaging;
 using NuGet.Packaging.Core;
 using NuGet.ProjectManagement;
 using NuGet.ProjectManagement.Projects;
+using NuGet.ProjectModel;
 using NuGet.Protocol.Core.Types;
 using NuGet.Resolver;
 
-namespace NuGetConsole.Host.PowerShell.Implementation
+namespace NuGetConsole.Host.PowerShell
 {
+    /// <summary>
+    /// Helper class collecting installed packages in all supported projects in topological order.
+    /// </summary>
     internal class InstalledPackageEnumerator
     {
-        private readonly IVsSolutionManager _solutionManager;
+        private readonly ISolutionManager _solutionManager;
         private readonly ISettings _settings;
+        private readonly Func<BuildIntegratedNuGetProject, Task<LockFile>> _getLockFileOrNullAsync;
 
-        public class PackageItem
+        public class PackageItem : IEquatable<PackageItem>
         {
             public PackageIdentity Identity { get; }
             public string InstallPath { get; }
@@ -39,10 +43,49 @@ namespace NuGetConsole.Host.PowerShell.Implementation
                 Identity = identity;
                 InstallPath = installPath;
             }
+
+            public bool Equals(PackageItem other)
+            {
+                if (other == null)
+                {
+                    return false;
+                }
+
+                if (object.ReferenceEquals(this, other))
+                {
+                    return true;
+                }
+
+                if (!PackageIdentityComparer.Default.Equals(Identity, other.Identity))
+                {
+                    return false;
+                }
+
+                if (!StringComparer.OrdinalIgnoreCase.Equals(InstallPath, other.InstallPath))
+                {
+                    return false;
+                }
+
+                return true;
+            }
+
+            public override bool Equals(object obj)
+            {
+                return Equals(obj as PackageItem);
+            }
+
+            public override int GetHashCode()
+            {
+                var hash = 0x11;
+                hash = hash * 0x1F + PackageIdentityComparer.Default.GetHashCode(Identity);
+                hash = hash * 0x1F + StringComparer.OrdinalIgnoreCase.GetHashCode(InstallPath);
+
+                return hash;
+            }
         }
 
         public InstalledPackageEnumerator(
-            IVsSolutionManager solutionManager,
+            ISolutionManager solutionManager,
             ISettings settings)
         {
             Assumes.Present(solutionManager);
@@ -50,6 +93,23 @@ namespace NuGetConsole.Host.PowerShell.Implementation
 
             _solutionManager = solutionManager;
             _settings = settings;
+            _getLockFileOrNullAsync = BuildIntegratedProjectUtility.GetLockFileOrNull;
+        }
+
+        /// <summary>
+        /// This constructor is used for creating a test instance
+        /// </summary>
+        internal InstalledPackageEnumerator(
+            ISolutionManager solutionManager,
+            ISettings settings,
+            Func<BuildIntegratedNuGetProject, Task<LockFile>> getLockFileOrNullAsync)
+        {
+            Assumes.Present(solutionManager);
+            Assumes.Present(settings);
+
+            _solutionManager = solutionManager;
+            _settings = settings;
+            _getLockFileOrNullAsync = getLockFileOrNullAsync ?? BuildIntegratedProjectUtility.GetLockFileOrNull;
         }
 
         public async Task<IEnumerable<PackageItem>> EnumeratePackagesAsync(
@@ -224,7 +284,7 @@ namespace NuGetConsole.Host.PowerShell.Implementation
         {
             token.ThrowIfCancellationRequested();
 
-            var lockFile = await BuildIntegratedProjectUtility.GetLockFileOrNull(project);
+            var lockFile = await _getLockFileOrNullAsync(project);
 
             if (lockFile == null)
             {
